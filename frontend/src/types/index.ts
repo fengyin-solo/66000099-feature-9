@@ -130,3 +130,46 @@ export interface HealthSummary {
   mediumPriorityCount: number;
   lowPriorityCount: number;
 }
+
+/** 巡检计划生命周期状态：进行中 / 已暂停 */
+export type InspectionPlanStatus = 'active' | 'paused';
+
+/** 巡检阶段：常规巡检 / 重点巡检（阶段切换后提醒范围与综合评分同步更新） */
+export type InspectionStage = 'routine' | 'focused';
+
+/** 计划内单台设备在某一时刻的健康快照，暂停后用于保留历史健康评分和在线率 */
+export interface InspectionDeviceSnapshot {
+  deviceId: string;
+  healthScore: number;
+  onlineRate: number;
+}
+
+export interface InspectionPlan {
+  id: string;
+  name: string;
+  description?: string;
+  deviceIds: string[];
+  status: InspectionPlanStatus;
+  stage: InspectionStage;
+  createdAt: string;
+  /** 暂停时间，仅 status === 'paused' 时存在 */
+  pausedAt?: string;
+  /** 暂停瞬间的历史健康快照，恢复后清空 */
+  frozenSnapshots?: InspectionDeviceSnapshot[];
+}
+
+export interface PlanStats {
+  deviceCount: number;
+  avgHealthScore: number;
+  avgOnlineRate: number;
+  /** 达到本计划巡检阶段提醒阈值、需要提醒的设备（暂停中的计划不参与提醒） */
+  reminderCount: number;
+  /** 当前统计是否来自暂停时保留的历史快照 */
+  fromSnapshot: boolean;
+}
+
+export interface InspectionReminder {
+  planId: string;
+  planName: string;
+  health: DeviceHealth;
+}

@@ -56,6 +56,12 @@
           cursor:'pointer', fontSize:'12px', fontWeight:500 }">
         📋 异常记录
       </button>
+      <button @click="activeTab = 'plans'"
+        :style="{ flex:1, padding:'8px', borderRadius:'6px', border:'1px solid ' + (activeTab === 'plans' ? '#1976d2' : '#ddd'),
+          background: activeTab === 'plans' ? '#e3f2fd' : '#fff', color: activeTab === 'plans' ? '#1976d2' : '#666',
+          cursor:'pointer', fontSize:'12px', fontWeight:500 }">
+        🗂️ 巡检计划
+      </button>
     </div>
 
     <div v-if="activeTab === 'overview'" style="flex:1;overflow:auto;display:flex;flex-direction:column;gap:12px">
@@ -271,6 +277,8 @@
       </div>
     </div>
 
+    <InspectionPlanPanel v-if="activeTab === 'plans'" @view-device="handlePlanDeviceClick" />
+
     <div style="margin-top:12px;padding-top:12px;border-top:1px solid #e0e0e0;flex-shrink:0">
       <div style="display:flex;gap:8px;font-size:11px;color:#888;flex-wrap:wrap;justify-content:center">
         <span>🟢 正常 ≥70分</span>
@@ -285,10 +293,11 @@
 import { ref, computed, watch, onMounted, nextTick } from 'vue';
 import { useIotStore } from '../stores/iot';
 import type { DeviceHealth, AlertType, AlertSeverity, Alert, HealthDataPoint } from '../types';
+import InspectionPlanPanel from './InspectionPlanPanel.vue';
 
 const store = useIotStore();
 
-const activeTab = ref<'overview' | 'priority' | 'records'>('priority');
+const activeTab = ref<'overview' | 'priority' | 'records' | 'plans'>('priority');
 const selectedDevice = ref<DeviceHealth | null>(null);
 const batteryChartRef = ref<HTMLElement | null>(null);
 const tempChartRef = ref<HTMLElement | null>(null);
@@ -315,6 +324,15 @@ function handleAlertClick(alert: Alert) {
     selectedDevice.value = health;
   }
   store.setHighlightedDevice(alert.deviceId);
+}
+
+function handlePlanDeviceClick(health: DeviceHealth) {
+  selectedDevice.value = health;
+  store.setHighlightedDevice(health.deviceId);
+  activeTab.value = 'overview';
+  nextTick(() => {
+    renderCharts();
+  });
 }
 
 function handleHover(deviceId: string | null) {
@@ -581,6 +599,7 @@ onMounted(() => {
   if (store.deviceHealthList.length > 0 && !selectedDevice.value) {
     selectedDevice.value = store.deviceHealthList[0];
   }
+  store.fetchInspectionPlans();
   nextTick(() => {
     renderCharts();
   });

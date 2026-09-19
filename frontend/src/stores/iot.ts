@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import type { Device, Geofence, Alert, AlertType, AlertSeverity, DeviceGroup, DeviceThresholds, TrackData, TrackPoint, StayPoint, TrackSegment, HealthDataPoint, DeviceHealth, HealthSummary } from '../types';
+import type { Device, Geofence, Alert, AlertType, AlertSeverity, DeviceGroup, DeviceThresholds, TrackData, TrackPoint, StayPoint, TrackSegment, HealthDataPoint, DeviceHealth, HealthSummary, InspectionPlan, InspectionStage, PlanStats, InspectionReminder } from '../types';
 
 function generateId(prefix: string) {
   return prefix + Date.now() + Math.random().toString(36).slice(2, 6);
@@ -857,6 +857,202 @@ export const useIotStore = defineStore('iot', () => {
     return deviceHealthList.value.find(h => h.deviceId === deviceId);
   }
 
+  // ============ 分组巡检生命周期 ============
+
+  /** 各巡检阶段的提醒阈值：综合评分低于阈值的设备进入提醒名单 */
+  const STAGE_REMINDER_THRESHOLD: Record<InspectionStage, number> = {
+    routine: 60,
+    focused: 80
+  };
+
+  const inspectionPlans = ref<InspectionPlan[]>([]);
+  const inspectionPlansLoading = ref(false);
+  const inspectionPlansError = ref<string | null>(null);
+  /** 首次加载是否已经尝试过：用于演示网络失败后的空态与重试 */
+  const inspectionPlansLoadedOnce = ref(false);
+
+  function onlineRateOf(history: HealthDataPoint[]): number {
+    if (history.length === 0) return 0;
+    return Math.round((history.filter(p => p.isOnline).length / history.length) * 100);
+  }
+
+  /** 构建设备列表在当前时刻的健康评分/在线率快照，暂停计划时冻结历史 */
+  function buildFrozenSnapshots(deviceIds: string[]): InspectionPlan['frozenSnapshots'] {
+    return deviceIds
+      .map(id => {
+        const device = getDeviceById(id);
+        if (!device) return null;
+        return {
+          deviceId: id,
+          healthScore: calculateHealthScore(device),
+          onlineRate: onlineRateOf(generateHealthHistory(device))
+        };
+      })
+      .filter((s): s is NonNullable<typeof s> => s !== null);
+  }
+
+  const nowIso = () => new Date().toISOString();
+
+  const seedInspectionPlans: InspectionPlan[] = [
+    {
+      id: 'ip1',
+      name: '生产车间巡检',
+      description: '生产线传感器每日健康巡检',
+      deviceIds: ['d1', 'd2', 'd4'],
+      status: 'active',
+      stage: 'focused',
+      createdAt: new Date(Date.now() - 7 * 86400000).toISOString()
+    },
+    {
+      id: 'ip2',
+      name: '仓储区域巡检',
+      description: '仓库设备周期巡检（暂时停工）',
+      deviceIds: ['d3', 'd5'],
+      status: 'paused',
+      stage: 'routine',
+      createdAt: new Date(Date.now() - 14 * 86400000).toISOString(),
+      pausedAt: new Date(Date.now() - 2 * 86400000).toISOString(),
+      frozenSnapshots: [
+        { deviceId: 'd3', healthScore: 18, onlineRate: 62 },
+        { deviceId: 'd5', healthScore: 96, onlineRate: 100 }
+      ]
+    }
+  ];
+
+  /** 模拟拉取巡检计划：首次加载失败以展示空态/重试，重试成功 */
+  async function fetchInspectionPlans() {
+    inspectionPlansLoading.value = true;
+    inspectionPlansError.value = null;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        setTimeout(() => {
+          if (!inspectionPlansLoadedOnce.value) {
+            reject(new Error('network'));
+          } else {
+            resolve();
+          }
+        }, 600);
+      });
+      inspectionPlansLoadedOnce.value = true;
+      if (inspectionPlans.value.length === 0) {
+        inspectionPlans.value = seedInspectionPlans.map(p => ({ ...p, deviceIds: [...p.deviceIds], frozenSnapshots: p.frozenSnapshots?.map(s => ({ ...s })) }));
+      }
+    } catch {
+      inspectionPlansError.value = '巡检计划加载失败，请检查网络后重试';
+    } finally {
+      inspectionPlansLoading.value = false;
+    }
+  }
+
+  function createInspectionPlan(input: { name: string; description?: string; deviceIds: string[]; stage?: InspectionStage }): string | null {
+    const deviceIds = [...new Set(input.deviceIds.filter(id => getDeviceById(id)))];
+    if (deviceIds.length === 0) return null;
+    const plan: InspectionPlan = {
+      id: generateId('ip'),
+      name: input.name.trim() || '未命名巡检计划',
+      description: input.description?.trim() || undefined,
+      deviceIds,
+      status: 'active',
+      stage: input.stage || 'routine',
+      createdAt: nowIso()
+    };
+    inspectionPlans.value.unshift(plan);
+    return plan.id;
+  }
+
+  function pauseInspectionPlan(planId: string) {
+    const plan = inspectionPlans.value.find(p => p.id === planId);
+    // 暂停：冻结当前设备范围的历史健康评分和在线率，此后不参与提醒
+    if (plan && plan.status === 'active') {
+      plan.status = 'paused';
+      plan.pausedAt = nowIso();
+      plan.frozenSnapshots = buildFrozenSnapshots(plan.deviceIds);
+    }
+  }
+
+  function resumeInspectionPlan(planId: string) {
+    const plan = inspectionPlans.value.find(p => p.id === planId);
+    if (plan && plan.status === 'paused') {
+      plan.status = 'active';
+      plan.pausedAt = undefined;
+      plan.frozenSnapshots = undefined;
+    }
+  }
+
+  /** 阶段切换：常规 ↔ 重点，提醒阈值随之变化，综合评分按新阶段重新汇总 */
+  function setInspectionStage(planId: string, stage: InspectionStage) {
+    const plan = inspectionPlans.value.find(p => p.id === planId);
+    if (plan && plan.stage !== stage) {
+      plan.stage = stage;
+    }
+  }
+
+  /** 调整计划负责设备，计划范围与综合评分同步更新 */
+  function setInspectionPlanDevices(planId: string, deviceIds: string[]) {
+    const plan = inspectionPlans.value.find(p => p.id === planId);
+    if (!plan) return;
+    plan.deviceIds = [...new Set(deviceIds.filter(id => getDeviceById(id)))];
+    // 暂停中调整范围：保留历史口径，仅按新范围重组冻结快照
+    if (plan.status === 'paused') {
+      plan.frozenSnapshots = buildFrozenSnapshots(plan.deviceIds);
+    }
+  }
+
+  function getPlanDevices(plan: InspectionPlan): DeviceHealth[] {
+    return plan.deviceIds
+      .map(id => getDeviceHealth(id))
+      .filter((h): h is DeviceHealth => h !== undefined);
+  }
+
+  /** 单个计划的范围与综合评分：状态/阶段/范围/健康数据变化后自动重算 */
+  function getPlanStats(plan: InspectionPlan): PlanStats {
+    const threshold = STAGE_REMINDER_THRESHOLD[plan.stage];
+    if (plan.status === 'paused' && plan.frozenSnapshots) {
+      const snapshots = plan.frozenSnapshots.filter(s => plan.deviceIds.includes(s.deviceId));
+      if (snapshots.length === 0) {
+        return { deviceCount: 0, avgHealthScore: 0, avgOnlineRate: 0, reminderCount: 0, fromSnapshot: true };
+      }
+      return {
+        deviceCount: snapshots.length,
+        avgHealthScore: Math.round(snapshots.reduce((sum, s) => sum + s.healthScore, 0) / snapshots.length),
+        avgOnlineRate: Math.round(snapshots.reduce((sum, s) => sum + s.onlineRate, 0) / snapshots.length),
+        // 暂停计划不参与提醒
+        reminderCount: 0,
+        fromSnapshot: true
+      };
+    }
+
+    const list = getPlanDevices(plan);
+    if (list.length === 0) {
+      return { deviceCount: 0, avgHealthScore: 0, avgOnlineRate: 0, reminderCount: 0, fromSnapshot: false };
+    }
+    return {
+      deviceCount: list.length,
+      avgHealthScore: Math.round(list.reduce((sum, h) => sum + h.healthScore, 0) / list.length),
+      avgOnlineRate: Math.round(list.reduce((sum, h) => {
+        const total = h.onlineHours + h.offlineHours;
+        return sum + (total === 0 ? 0 : h.onlineHours / total);
+      }, 0) / list.length * 100),
+      reminderCount: list.filter(h => h.healthScore < threshold).length,
+      fromSnapshot: false
+    };
+  }
+
+  /** 巡检提醒：仅进行中的计划参与，按阶段阈值汇总低分设备 */
+  const inspectionReminders = computed<InspectionReminder[]>(() => {
+    const reminders: InspectionReminder[] = [];
+    for (const plan of inspectionPlans.value) {
+      if (plan.status !== 'active') continue;
+      const threshold = STAGE_REMINDER_THRESHOLD[plan.stage];
+      for (const health of getPlanDevices(plan)) {
+        if (health.healthScore < threshold) {
+          reminders.push({ planId: plan.id, planName: plan.name, health });
+        }
+      }
+    }
+    return reminders.sort((a, b) => a.health.healthScore - b.health.healthScore);
+  });
+
   return {
     devices, fences, alerts, selectedFenceId, editMode, highlightedDeviceId,
     isRegisteringDevice, registrationLocation, groups,
@@ -869,7 +1065,11 @@ export const useIotStore = defineStore('iot', () => {
     isPlaying, playbackSpeed, showTrack, showStayPoints, showBreachEvents,
     playbackCurrentPoint, playbackProgress, playbackCurrentTime,
     deviceHealthList, priorityInspectionList, healthSummary, recentAbnormalRecords,
+    inspectionPlans, inspectionPlansLoading, inspectionPlansError, inspectionReminders,
     getDeviceById, getFenceById, getGroupById, getDeviceHealth,
+    fetchInspectionPlans, createInspectionPlan, pauseInspectionPlan, resumeInspectionPlan,
+    setInspectionStage, setInspectionPlanDevices, getPlanDevices, getPlanStats,
+    STAGE_REMINDER_THRESHOLD,
     acknowledgeAlert, batchAcknowledgeAlerts, acknowledgeAllAlerts,
     setHighlightedDevice, addAlert, generateMockAlert,
     startMockAlertStream, stopMockAlertStream,
