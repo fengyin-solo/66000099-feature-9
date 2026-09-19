@@ -130,3 +130,43 @@ export interface HealthSummary {
   mediumPriorityCount: number;
   lowPriorityCount: number;
 }
+
+export type InspectionPlanStatus = 'active' | 'paused';
+
+export interface PlanStatsPoint {
+  timestamp: string;
+  avgHealthScore: number;
+  avgOnlineRate: number;
+  alertCount: number;
+}
+
+export interface PlanStatsSnapshot {
+  avgHealthScore: number;
+  avgOnlineRate: number;
+  avgBatteryLevel: number;
+  alertCount: number;
+  deviceCount: number;
+}
+
+export type PlanStatusLogType = 'created' | 'updated' | 'active' | 'paused';
+
+export interface PlanStatusLog {
+  type: PlanStatusLogType;
+  timestamp: string;
+  message: string;
+}
+
+export interface InspectionPlan {
+  id: string;
+  name: string;
+  description?: string;
+  deviceIds: string[];
+  status: InspectionPlanStatus;
+  createdAt: string;
+  updatedAt: string;
+  pausedAt?: string;
+  reminderEnabled: boolean;
+  history: PlanStatsPoint[];
+  frozenStats?: PlanStatsSnapshot;
+  statusLogs: PlanStatusLog[];
+}

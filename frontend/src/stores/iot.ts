@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import type { Device, Geofence, Alert, AlertType, AlertSeverity, DeviceGroup, DeviceThresholds, TrackData, TrackPoint, StayPoint, TrackSegment, HealthDataPoint, DeviceHealth, HealthSummary } from '../types';
+import type { Device, Geofence, Alert, AlertType, AlertSeverity, DeviceGroup, DeviceThresholds, TrackData, TrackPoint, StayPoint, TrackSegment, HealthDataPoint, DeviceHealth, HealthSummary, InspectionPlan, PlanStatsPoint, PlanStatsSnapshot, PlanStatusLog, PlanStatusLogType } from '../types';
 
 function generateId(prefix: string) {
   return prefix + Date.now() + Math.random().toString(36).slice(2, 6);
@@ -80,6 +80,13 @@ export const useIotStore = defineStore('iot', () => {
     { id: 'g3', name: '办公区域', color: '#f57c00', description: '办公环境监测' },
     { id: 'g4', name: '室外设施', color: '#7b1fa2', description: '户外设备' },
   ]);
+
+  // ---- 分组巡检计划生命周期 ----
+  const inspectionPlans = ref<InspectionPlan[]>([]);
+  const plansLoaded = ref(false);
+  const plansLoading = ref(false);
+  const plansLoadError = ref(false);
+  let plansSeedCache: InspectionPlan[] | null = null;
 
   const onlineCount = computed(() => devices.value.filter(d => d.status === 'online').length);
   const offlineCount = computed(() => devices.value.filter(d => d.status === 'offline').length);
@@ -857,6 +864,239 @@ export const useIotStore = defineStore('iot', () => {
     return deviceHealthList.value.find(h => h.deviceId === deviceId);
   }
 
+  // ============ 分组巡检计划 ============
+
+  // 按计划范围汇总设备健康；无设备时返回 null（对应空态）
+  function buildPlanStats(deviceIds: string[]): PlanStatsSnapshot | null {
+    const list = deviceIds
+      .map(id => getDeviceHealth(id))
+      .filter((h): h is DeviceHealth => !!h);
+    if (list.length === 0) return null;
+
+    const avgHealthScore = Math.round(list.reduce((s, h) => s + h.healthScore, 0) / list.length);
+    const avgBatteryLevel = Math.round(list.reduce((s, h) => s + h.batteryLevel, 0) / list.length);
+    const alertCount = list.reduce((s, h) => s + h.alertCount, 0);
+    const avgOnlineRate = Math.round(
+      list.reduce((s, h) => {
+        const total = h.onlineHours + h.offlineHours;
+        return s + (total === 0 ? 0 : (h.onlineHours / total) * 100);
+      }, 0) / list.length
+    );
+
+    return { avgHealthScore, avgOnlineRate, avgBatteryLevel, alertCount, deviceCount: list.length };
+  }
+
+  // 活动计划读取实时综合统计；暂停计划读取暂停时冻结的历史快照
+  function getPlanStats(plan: InspectionPlan): PlanStatsSnapshot | null {
+    if (plan.status === 'paused') {
+      return plan.frozenStats ?? null;
+    }
+    return buildPlanStats(plan.deviceIds);
+  }
+
+  function pushPlanHistoryPoint(plan: InspectionPlan, stats: PlanStatsSnapshot | null) {
+    if (!stats) return;
+    const point: PlanStatsPoint = {
+      timestamp: new Date().toISOString(),
+      avgHealthScore: stats.avgHealthScore,
+      avgOnlineRate: stats.avgOnlineRate,
+      alertCount: stats.alertCount
+    };
+    plan.history.push(point);
+    if (plan.history.length > 60) plan.history.splice(0, plan.history.length - 60);
+  }
+
+  function addPlanStatusLog(plan: InspectionPlan, type: PlanStatusLogType, message: string) {
+    const log: PlanStatusLog = { type, timestamp: new Date().toISOString(), message };
+    plan.statusLogs.push(log);
+    if (plan.statusLogs.length > 30) plan.statusLogs.shift();
+  }
+
+  function createInspectionPlan(name: string, deviceIds: string[], description?: string): string {
+    const now = new Date().toISOString();
+    const uniqueIds = [...new Set(deviceIds)].filter(id => getDeviceById(id));
+    const plan: InspectionPlan = {
+      id: generateId('p'),
+      name: name.trim(),
+      description: description?.trim() || undefined,
+      deviceIds: uniqueIds,
+      status: 'active',
+      createdAt: now,
+      updatedAt: now,
+      reminderEnabled: true,
+      history: [],
+      statusLogs: []
+    };
+    pushPlanHistoryPoint(plan, buildPlanStats(uniqueIds));
+    addPlanStatusLog(plan, 'created', `巡检计划已建立，负责 ${uniqueIds.length} 台设备`);
+    inspectionPlans.value.unshift(plan);
+    return plan.id;
+  }
+
+  // 调整负责设备：计划范围立即变更，综合评分随范围同步更新
+  function updatePlanDevices(planId: string, deviceIds: string[]) {
+    const plan = inspectionPlans.value.find(p => p.id === planId);
+    if (!plan) return;
+    const uniqueIds = [...new Set(deviceIds)].filter(id => getDeviceById(id));
+    plan.deviceIds = uniqueIds;
+    plan.updatedAt = new Date().toISOString();
+    addPlanStatusLog(plan, 'updated', `负责设备已调整为 ${uniqueIds.length} 台，计划范围与综合评分已同步`);
+    if (plan.status === 'active') {
+      pushPlanHistoryPoint(plan, buildPlanStats(uniqueIds));
+    }
+    // 暂停状态仅变更范围并保留历史健康评分与在线率（frozenStats 不刷新）
+  }
+
+  // 暂停：退出提醒，冻结当前综合评分/在线率，历史评分与在线率保留
+  function pauseInspectionPlan(planId: string) {
+    const plan = inspectionPlans.value.find(p => p.id === planId);
+    if (!plan || plan.status !== 'active') return;
+    const stats = buildPlanStats(plan.deviceIds);
+    plan.status = 'paused';
+    plan.reminderEnabled = false;
+    plan.pausedAt = new Date().toISOString();
+    plan.updatedAt = plan.pausedAt;
+    plan.frozenStats = stats ?? undefined;
+    if (stats) {
+      plan.history.push({
+        timestamp: plan.pausedAt,
+        avgHealthScore: stats.avgHealthScore,
+        avgOnlineRate: stats.avgOnlineRate,
+        alertCount: stats.alertCount
+      });
+    }
+    addPlanStatusLog(plan, 'paused', '计划已暂停，暂停期间不参与巡检提醒，历史健康评分与在线率已保留');
+  }
+
+  // 恢复：重新参与提醒，从当前计划范围恢复实时统计
+  function resumeInspectionPlan(planId: string) {
+    const plan = inspectionPlans.value.find(p => p.id === planId);
+    if (!plan || plan.status !== 'paused') return;
+    const now = new Date().toISOString();
+    plan.status = 'active';
+    plan.reminderEnabled = true;
+    plan.pausedAt = undefined;
+    plan.frozenStats = undefined;
+    plan.updatedAt = now;
+    pushPlanHistoryPoint(plan, buildPlanStats(plan.deviceIds));
+    addPlanStatusLog(plan, 'active', '计划已恢复，继续参与巡检提醒，综合评分按当前设备范围同步');
+  }
+
+  // 需提醒的低健康设备数（仅活动且开启提醒的计划）
+  function getPlanReminderCount(plan: InspectionPlan): number {
+    if (plan.status === 'paused' || !plan.reminderEnabled) return 0;
+    return plan.deviceIds
+      .map(id => getDeviceHealth(id))
+      .filter(h => !!h && h.healthScore < 60).length;
+  }
+
+  const activeInspectionPlans = computed(() =>
+    inspectionPlans.value.filter(p => p.status === 'active' && p.reminderEnabled)
+  );
+
+  const totalPlanReminders = computed(() =>
+    activeInspectionPlans.value.reduce((sum, p) => sum + getPlanReminderCount(p), 0)
+  );
+
+  function seedPlanHistory(deviceIds: string[]): PlanStatsPoint[] {
+    const points: PlanStatsPoint[] = [];
+    const now = Date.now();
+    const interval = 2 * 3600 * 1000; // 每2小时一个点，覆盖最近24小时
+    const live = buildPlanStats(deviceIds);
+    let score = live ? live.avgHealthScore + (Math.random() - 0.5) * 10 : 80 + Math.random() * 15;
+    let online = live ? live.avgOnlineRate + (Math.random() - 0.5) * 8 : 85 + Math.random() * 12;
+    for (let i = 12; i >= 1; i--) {
+      score += (live ? live.avgHealthScore : 85 - score) * 0.15 + (Math.random() - 0.5) * 4;
+      online += (live ? live.avgOnlineRate : 90 - online) * 0.15 + (Math.random() - 0.5) * 3;
+      points.push({
+        timestamp: new Date(now - i * interval).toISOString(),
+        avgHealthScore: Math.max(0, Math.min(100, Math.round(score))),
+        avgOnlineRate: Math.max(0, Math.min(100, Math.round(online))),
+        alertCount: Math.max(0, Math.round(Math.random() * 3))
+      });
+    }
+    return points;
+  }
+
+  function buildSeedPlans(): InspectionPlan[] {
+    const now = new Date().toISOString();
+    const activeDeviceIds = ['d1', 'd4', 'd5'];
+    const pausedDeviceIds = ['d2', 'd3'];
+
+    const activePlan: InspectionPlan = {
+      id: 'p1',
+      name: '生产设备日巡检',
+      description: '生产线在线传感器每日健康巡检',
+      deviceIds: activeDeviceIds,
+      status: 'active',
+      createdAt: new Date(Date.now() - 7 * 86400000).toISOString(),
+      updatedAt: now,
+      reminderEnabled: true,
+      history: [],
+      statusLogs: [
+        { type: 'created', timestamp: new Date(Date.now() - 7 * 86400000).toISOString(), message: '巡检计划已建立，负责 3 台设备' }
+      ]
+    };
+    activePlan.history = seedPlanHistory(activeDeviceIds);
+    pushPlanHistoryPoint(activePlan, buildPlanStats(activeDeviceIds));
+
+    const frozen = buildPlanStats(pausedDeviceIds);
+    const pausedPlan: InspectionPlan = {
+      id: 'p2',
+      name: '仓储设备周巡检',
+      description: '仓库监控设备，维护期间暂停',
+      deviceIds: pausedDeviceIds,
+      status: 'paused',
+      createdAt: new Date(Date.now() - 14 * 86400000).toISOString(),
+      updatedAt: now,
+      pausedAt: new Date(Date.now() - 2 * 86400000).toISOString(),
+      reminderEnabled: false,
+      history: [],
+      frozenStats: frozen ?? undefined,
+      statusLogs: [
+        { type: 'created', timestamp: new Date(Date.now() - 14 * 86400000).toISOString(), message: '巡检计划已建立，负责 2 台设备' },
+        { type: 'paused', timestamp: new Date(Date.now() - 2 * 86400000).toISOString(), message: '计划已暂停，暂停期间不参与巡检提醒，历史健康评分与在线率已保留' }
+      ]
+    };
+    pausedPlan.history = seedPlanHistory(pausedDeviceIds);
+    if (frozen) {
+      pausedPlan.history.push({
+        timestamp: pausedPlan.pausedAt!,
+        avgHealthScore: frozen.avgHealthScore,
+        avgOnlineRate: frozen.avgOnlineRate,
+        alertCount: frozen.alertCount
+      });
+    }
+
+    return [activePlan, pausedPlan];
+  }
+
+  // 模拟后端加载：有一定失败概率，支持重试
+  function loadInspectionPlans(): Promise<void> {
+    plansLoading.value = true;
+    plansLoadError.value = false;
+    return new Promise((resolve, reject) => {
+      window.setTimeout(() => {
+        if (Math.random() < 0.25) {
+          plansLoading.value = false;
+          plansLoadError.value = true;
+          reject(new Error('巡检计划加载失败'));
+          return;
+        }
+        if (!plansSeedCache) plansSeedCache = buildSeedPlans();
+        inspectionPlans.value = plansSeedCache.map(p => JSON.parse(JSON.stringify(p)));
+        plansLoading.value = false;
+        plansLoaded.value = true;
+        plansLoadError.value = false;
+        resolve();
+      }, 600);
+    });
+  }
+
+  function retryLoadInspectionPlans(): Promise<void> {
+    return loadInspectionPlans();
+  }
+
   return {
     devices, fences, alerts, selectedFenceId, editMode, highlightedDeviceId,
     isRegisteringDevice, registrationLocation, groups,
@@ -870,6 +1110,11 @@ export const useIotStore = defineStore('iot', () => {
     playbackCurrentPoint, playbackProgress, playbackCurrentTime,
     deviceHealthList, priorityInspectionList, healthSummary, recentAbnormalRecords,
     getDeviceById, getFenceById, getGroupById, getDeviceHealth,
+    inspectionPlans, plansLoaded, plansLoading, plansLoadError,
+    activeInspectionPlans, totalPlanReminders,
+    loadInspectionPlans, retryLoadInspectionPlans,
+    createInspectionPlan, updatePlanDevices, pauseInspectionPlan, resumeInspectionPlan,
+    buildPlanStats, getPlanStats, getPlanReminderCount,
     acknowledgeAlert, batchAcknowledgeAlerts, acknowledgeAllAlerts,
     setHighlightedDevice, addAlert, generateMockAlert,
     startMockAlertStream, stopMockAlertStream,

@@ -38,23 +38,36 @@
     </div>
 
     <div style="display:flex;gap:6px;margin-bottom:12px;flex-shrink:0">
-      <button @click="activeTab = 'overview'"
-        :style="{ flex:1, padding:'8px', borderRadius:'6px', border:'1px solid ' + (activeTab === 'overview' ? '#1976d2' : '#ddd'),
+      <button @click="switchTab('overview')"
+        :style="{ flex:1, padding:'8px 4px', borderRadius:'6px', border:'1px solid ' + (activeTab === 'overview' ? '#1976d2' : '#ddd'),
           background: activeTab === 'overview' ? '#e3f2fd' : '#fff', color: activeTab === 'overview' ? '#1976d2' : '#666',
           cursor:'pointer', fontSize:'12px', fontWeight:500 }">
         📊 趋势分析
       </button>
-      <button @click="activeTab = 'priority'"
-        :style="{ flex:1, padding:'8px', borderRadius:'6px', border:'1px solid ' + (activeTab === 'priority' ? '#1976d2' : '#ddd'),
+      <button @click="switchTab('priority')"
+        :style="{ flex:1, padding:'8px 4px', borderRadius:'6px', border:'1px solid ' + (activeTab === 'priority' ? '#1976d2' : '#ddd'),
           background: activeTab === 'priority' ? '#e3f2fd' : '#fff', color: activeTab === 'priority' ? '#1976d2' : '#666',
           cursor:'pointer', fontSize:'12px', fontWeight:500 }">
         ⚠️ 优先巡检
       </button>
-      <button @click="activeTab = 'records'"
-        :style="{ flex:1, padding:'8px', borderRadius:'6px', border:'1px solid ' + (activeTab === 'records' ? '#1976d2' : '#ddd'),
+      <button @click="switchTab('records')"
+        :style="{ flex:1, padding:'8px 4px', borderRadius:'6px', border:'1px solid ' + (activeTab === 'records' ? '#1976d2' : '#ddd'),
           background: activeTab === 'records' ? '#e3f2fd' : '#fff', color: activeTab === 'records' ? '#1976d2' : '#666',
           cursor:'pointer', fontSize:'12px', fontWeight:500 }">
         📋 异常记录
+      </button>
+      <button @click="switchTab('plans')"
+        :style="{ position:'relative', flex:1, padding:'8px 4px', borderRadius:'6px', border:'1px solid ' + (activeTab === 'plans' ? '#1976d2' : '#ddd'),
+          background: activeTab === 'plans' ? '#e3f2fd' : '#fff', color: activeTab === 'plans' ? '#1976d2' : '#666',
+          cursor:'pointer', fontSize:'12px', fontWeight:500 }">
+        🗂️ 巡检计划
+        <span v-if="store.totalPlanReminders > 0"
+          :style="{ position:'absolute', top:'-6px', right:'2px', minWidth:'16px', height:'16px',
+            borderRadius:'8px', background:'#e53935', color:'#fff', fontSize:'10px',
+            display:'flex', alignItems:'center', justifyContent:'center', fontWeight:700,
+            padding:'0 4px', lineHeight:'1' }">
+          {{ store.totalPlanReminders > 99 ? '99+' : store.totalPlanReminders }}
+        </span>
       </button>
     </div>
 
@@ -271,6 +284,236 @@
       </div>
     </div>
 
+    <!-- ============ 分组巡检计划 ============ -->
+    <div v-if="activeTab === 'plans'" style="flex:1;overflow:auto;display:flex;flex-direction:column;gap:8px">
+      <!-- 加载中 -->
+      <div v-if="store.plansLoading" style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:#888;font-size:12px;padding:40px 0">
+        <div :style="{ width:'28px', height:'28px', border:'3px solid #e0e0e0', borderTopColor:'#1976d2', borderRadius:'50%', animation:'dh-spin 0.8s linear infinite' }"></div>
+        <div>正在加载巡检计划…</div>
+      </div>
+
+      <!-- 加载失败：空态 + 重试 -->
+      <div v-else-if="store.plansLoadError"
+        style="text-align:center;padding:40px 20px;background:#fff;border-radius:8px;border:1px solid #e0e0e0;color:#666;font-size:13px">
+        <div style="font-size:32px;margin-bottom:8px">📡</div>
+        <div style="font-weight:600;color:#c62828;margin-bottom:4px">巡检计划加载失败</div>
+        <div style="font-size:11px;color:#999;margin-bottom:14px">请检查网络后重试，暂停中的计划历史数据不会丢失</div>
+        <button @click="handleRetryLoadPlans"
+          :disabled="store.plansLoading"
+          style="padding:6px 18px;border-radius:6px;border:1px solid #1976d2;background:#e3f2fd;color:#1976d2;cursor:pointer;font-size:12px;font-weight:600">
+          🔄 重新加载
+        </button>
+      </div>
+
+      <template v-else>
+        <!-- 系统无任何设备：空态 -->
+        <div v-if="store.devices.length === 0"
+          style="text-align:center;padding:40px 20px;background:#fff;border-radius:8px;border:1px solid #e0e0e0;color:#999;font-size:13px">
+          <div style="font-size:32px;margin-bottom:8px">📭</div>
+          <div>暂无可巡检设备</div>
+          <div style="font-size:11px;margin-top:6px">请先注册设备后再建立巡检计划</div>
+        </div>
+
+        <template v-else>
+          <div style="background:#fff;padding:10px 12px;border-radius:8px;border:1px solid #e0e0e0;display:flex;justify-content:space-between;align-items:center">
+            <span style="font-size:12px;color:#666">共 {{ store.inspectionPlans.length }} 个计划 · {{ activePlanCount }} 个进行中</span>
+            <button @click="openCreatePlan"
+              style="padding:5px 12px;border-radius:6px;border:none;background:#1976d2;color:#fff;cursor:pointer;font-size:12px;font-weight:600;flex-shrink:0">
+              ➕ 新建计划
+            </button>
+          </div>
+
+          <!-- 计划列表为空：空态 -->
+          <div v-if="store.inspectionPlans.length === 0"
+            style="text-align:center;padding:40px 20px;background:#fff;border-radius:8px;border:1px solid #e0e0e0;color:#999;font-size:13px">
+            <div style="font-size:32px;margin-bottom:8px">🗂️</div>
+            <div>暂无巡检计划</div>
+            <div style="font-size:11px;margin-top:6px;margin-bottom:14px">管理员可建立分组巡检计划，统一关注一组设备的健康评分与在线率</div>
+            <button @click="openCreatePlan"
+              style="padding:6px 18px;border-radius:6px;border:1px solid #1976d2;background:#e3f2fd;color:#1976d2;cursor:pointer;font-size:12px;font-weight:600">
+              ➕ 建立巡检计划
+            </button>
+          </div>
+
+          <!-- 计划卡片 -->
+          <div v-for="plan in store.inspectionPlans" :key="plan.id"
+            style="background:#fff;border-radius:8px;border:1px solid #e0e0e0;padding:12px;display:flex;flex-direction:column;gap:8px">
+            <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px">
+              <div style="min-width:0">
+                <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                  <span style="font-weight:700;font-size:13px;color:#333">{{ plan.name }}</span>
+                  <span :style="getStatusBadgeStyle(plan.status)">
+                    {{ plan.status === 'active' ? '🟢 进行中' : '⏸️ 已暂停' }}
+                  </span>
+                  <span v-if="plan.status === 'paused'" style="font-size:10px;color:#999">
+                    不参与提醒 · 数据冻结于 {{ formatPlanTime(plan.pausedAt) }}
+                  </span>
+                </div>
+                <div v-if="plan.description" style="font-size:11px;color:#999;margin-top:3px">{{ plan.description }}</div>
+              </div>
+            </div>
+
+            <!-- 提醒条：仅活动计划且有低分设备时出现 -->
+            <div v-if="store.getPlanReminderCount(plan) > 0"
+              style="font-size:11px;color:#c62828;background:#ffebee;border-radius:6px;padding:6px 8px">
+              🔔 {{ store.getPlanReminderCount(plan) }} 台负责设备健康分低于 60，建议优先巡检
+            </div>
+            <div v-else-if="plan.status === 'active'"
+              style="font-size:11px;color:#2e7d32;background:#e8f5e9;border-radius:6px;padding:6px 8px">
+              ✅ 负责设备整体健康，无需特别提醒
+            </div>
+            <div v-else
+              style="font-size:11px;color:#888;background:#f5f5f5;border-radius:6px;padding:6px 8px">
+              🔕 计划已暂停，暂停期间保留历史健康评分与在线率
+            </div>
+
+            <!-- 综合评分（活动实时 / 暂停冻结） -->
+            <div v-if="getStats(plan)" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">
+              <div style="text-align:center;padding:8px 4px;background:#fafafa;border-radius:6px">
+                <div :style="{ fontSize:'16px', fontWeight:700, color:getHealthScoreTextColor(getStats(plan)!.avgHealthScore) }">
+                  {{ getStats(plan)!.avgHealthScore }}
+                </div>
+                <div style="font-size:10px;color:#888">{{ plan.status === 'paused' ? '冻结评分' : '综合评分' }}</div>
+              </div>
+              <div style="text-align:center;padding:8px 4px;background:#fafafa;border-radius:6px">
+                <div style="font-size:16px;font-weight:700;color:#2e7d32">{{ getStats(plan)!.avgOnlineRate }}%</div>
+                <div style="font-size:10px;color:#888">在线率</div>
+              </div>
+              <div style="text-align:center;padding:8px 4px;background:#fafafa;border-radius:6px">
+                <div :style="{ fontSize:'16px', fontWeight:700, color:getStats(plan)!.avgBatteryLevel < 30 ? '#e65100' : '#1565c0' }">
+                  {{ getStats(plan)!.avgBatteryLevel }}%
+                </div>
+                <div style="font-size:10px;color:#888">平均电量</div>
+              </div>
+              <div style="text-align:center;padding:8px 4px;background:#fafafa;border-radius:6px">
+                <div :style="{ fontSize:'16px', fontWeight:700, color:getStats(plan)!.alertCount > 0 ? '#c62828' : '#2e7d32' }">
+                  {{ getStats(plan)!.alertCount }}
+                </div>
+                <div style="font-size:10px;color:#888">待处理异常</div>
+              </div>
+            </div>
+
+            <!-- 计划内无设备：空态 -->
+            <div v-else
+              style="font-size:11px;color:#e65100;background:#fff8e1;border-radius:6px;padding:8px;text-align:center">
+              ⚠️ 该计划暂无负责设备，综合评分不可用，请调整负责设备
+            </div>
+
+            <!-- 历史健康评分 / 在线率趋势（暂停时保留） -->
+            <div v-if="plan.history.length > 0" style="background:#fafafa;border-radius:6px;padding:8px">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+                <span style="font-size:10px;color:#888">📈 历史健康评分 / 在线率</span>
+                <span style="font-size:10px;color:#bbb">最近 {{ plan.history.length }} 个巡检点</span>
+              </div>
+              <div v-html="renderPlanSparkline(plan)" style="line-height:0"></div>
+              <div style="display:flex;gap:12px;margin-top:4px;font-size:10px;color:#888">
+                <span><span style="color:#1976d2">●</span> 健康评分</span>
+                <span><span style="color:#4caf50">●</span> 在线率</span>
+              </div>
+            </div>
+
+            <!-- 负责设备 -->
+            <div>
+              <div style="font-size:10px;color:#888;margin-bottom:4px">负责设备（{{ plan.deviceIds.length }}）</div>
+              <div v-if="plan.deviceIds.length > 0" style="display:flex;flex-wrap:wrap;gap:4px">
+                <span v-for="id in plan.deviceIds" :key="id"
+                  @click="jumpToDevice(id)"
+                  style="font-size:10px;padding:2px 8px;border-radius:10px;background:#e3f2fd;color:#1565c0;cursor:pointer">
+                  {{ getDeviceName(id) }}
+                </span>
+              </div>
+              <div v-else style="font-size:11px;color:#999">未分配设备</div>
+            </div>
+
+            <!-- 状态流转 -->
+            <div style="border-top:1px dashed #eee;padding-top:6px">
+              <div v-for="(log, idx) in [...plan.statusLogs].slice(-3).reverse()" :key="idx"
+                style="display:flex;gap:6px;font-size:10px;color:#999;margin-bottom:2px">
+                <span>{{ getStatusLogIcon(log.type) }}</span>
+                <span style="flex:1;color:#777">{{ log.message }}</span>
+                <span style="flex-shrink:0">{{ formatPlanTime(log.timestamp) }}</span>
+              </div>
+            </div>
+
+            <!-- 生命周期操作 -->
+            <div style="display:flex;gap:6px;border-top:1px solid #f0f0f0;padding-top:8px">
+              <button @click="openEditPlan(plan)"
+                style="flex:1;padding:6px;border-radius:6px;border:1px solid #1976d2;background:#fff;color:#1976d2;cursor:pointer;font-size:11px;font-weight:600">
+                🛠️ 调整设备
+              </button>
+              <button v-if="plan.status === 'active'" @click="handlePause(plan)"
+                style="flex:1;padding:6px;border-radius:6px;border:1px solid #f57c00;background:#fff3e0;color:#e65100;cursor:pointer;font-size:11px;font-weight:600">
+                ⏸️ 暂停计划
+              </button>
+              <button v-else @click="handleResume(plan)"
+                style="flex:1;padding:6px;border-radius:6px;border:1px solid #2e7d32;background:#e8f5e9;color:#2e7d32;cursor:pointer;font-size:11px;font-weight:600">
+                ▶️ 恢复计划
+              </button>
+            </div>
+          </div>
+        </template>
+      </template>
+
+      <!-- 新建 / 调整设备 编辑器 -->
+      <div v-if="editorVisible"
+        style="background:#fff;border-radius:8px;border:2px solid #1976d2;padding:12px;display:flex;flex-direction:column;gap:10px;position:sticky;bottom:0;box-shadow:0 -4px 12px rgba(0,0,0,0.08)">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-weight:700;font-size:13px;color:#333">
+            {{ editorMode === 'create' ? '➕ 建立巡检计划' : '🛠️ 调整负责设备' }}
+          </span>
+          <button @click="closeEditor" style="background:none;border:none;cursor:pointer;color:#999;font-size:16px">×</button>
+        </div>
+
+        <div v-if="editorMode === 'create'">
+          <label style="font-size:11px;color:#888;display:block;margin-bottom:4px">计划名称</label>
+          <input v-model="editorName" type="text" placeholder="例如：生产设备日巡检"
+            style="width:100%;box-sizing:border-box;padding:7px 10px;border:1px solid #ddd;border-radius:6px;font-size:12px;outline:none" />
+          <label style="font-size:11px;color:#888;display:block;margin:8px 0 4px">计划说明（可选）</label>
+          <input v-model="editorDescription" type="text" placeholder="计划的巡检范围或目的"
+            style="width:100%;box-sizing:border-box;padding:7px 10px;border:1px solid #ddd;border-radius:6px;font-size:12px;outline:none" />
+        </div>
+
+        <div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+            <label style="font-size:11px;color:#888">负责设备（已选 {{ editorSelectedIds.length }} 台）</label>
+            <div style="display:flex;gap:8px">
+              <button type="button" @click="toggleSelectAllDevices(true)" style="background:none;border:none;color:#1976d2;font-size:11px;cursor:pointer">全选</button>
+              <button type="button" @click="toggleSelectAllDevices(false)" style="background:none;border:none;color:#999;font-size:11px;cursor:pointer">清空</button>
+            </div>
+          </div>
+          <div v-if="store.devices.length === 0" style="font-size:11px;color:#e65100;background:#fff8e1;border-radius:6px;padding:8px;text-align:center">
+            暂无可分配设备，请先注册设备
+          </div>
+          <div v-else style="max-height:150px;overflow:auto;border:1px solid #eee;border-radius:6px;padding:6px;display:flex;flex-direction:column;gap:4px">
+            <label v-for="device in store.devices" :key="device.id"
+              style="display:flex;align-items:center;gap:8px;padding:5px 6px;border-radius:4px;cursor:pointer;font-size:12px"
+              :style="{ background: editorSelectedIds.includes(device.id) ? '#e3f2fd' : 'transparent' }">
+              <input type="checkbox" :checked="editorSelectedIds.includes(device.id)"
+                @change="toggleDevice(device.id)" style="cursor:pointer" />
+              <span style="flex:1;color:#333">{{ device.name }}</span>
+              <span :style="{ fontSize:'10px', padding:'1px 6px', borderRadius:'8px',
+                background:getHealthScoreBgColor(getDeviceHealthScore(device.id)),
+                color:getHealthScoreTextColor(getDeviceHealthScore(device.id)) }">
+                {{ getDeviceHealthScore(device.id) }}分
+              </span>
+            </label>
+          </div>
+        </div>
+
+        <div style="display:flex;gap:8px">
+          <button @click="closeEditor"
+            style="flex:1;padding:8px;border-radius:6px;border:1px solid #ddd;background:#fff;color:#666;cursor:pointer;font-size:12px">
+            取消
+          </button>
+          <button @click="handleSavePlan" :disabled="!canSavePlan"
+            :style="{ flex:1, padding:'8px', borderRadius:'6px', border:'none', cursor: canSavePlan ? 'pointer' : 'not-allowed',
+              background: canSavePlan ? '#1976d2' : '#bdbdbd', color:'#fff', fontSize:'12px', fontWeight:600 }">
+            {{ editorMode === 'create' ? '建立计划' : '保存调整' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <div style="margin-top:12px;padding-top:12px;border-top:1px solid #e0e0e0;flex-shrink:0">
       <div style="display:flex;gap:8px;font-size:11px;color:#888;flex-wrap:wrap;justify-content:center">
         <span>🟢 正常 ≥70分</span>
@@ -284,14 +527,174 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, nextTick } from 'vue';
 import { useIotStore } from '../stores/iot';
-import type { DeviceHealth, AlertType, AlertSeverity, Alert, HealthDataPoint } from '../types';
+import type { DeviceHealth, AlertType, AlertSeverity, Alert, HealthDataPoint, InspectionPlan, InspectionPlanStatus, PlanStatsSnapshot, PlanStatusLogType } from '../types';
 
 const store = useIotStore();
 
-const activeTab = ref<'overview' | 'priority' | 'records'>('priority');
+const activeTab = ref<'overview' | 'priority' | 'records' | 'plans'>('priority');
 const selectedDevice = ref<DeviceHealth | null>(null);
 const batteryChartRef = ref<HTMLElement | null>(null);
 const tempChartRef = ref<HTMLElement | null>(null);
+
+// ---- 巡检计划 ----
+const editorVisible = ref(false);
+const editorMode = ref<'create' | 'edit'>('create');
+const editingPlanId = ref<string | null>(null);
+const editorName = ref('');
+const editorDescription = ref('');
+const editorSelectedIds = ref<string[]>([]);
+
+const activePlanCount = computed(() => store.inspectionPlans.filter(p => p.status === 'active').length);
+const canSavePlan = computed(() =>
+  editorSelectedIds.value.length > 0 &&
+  (editorMode.value === 'edit' || editorName.value.trim().length > 0)
+);
+
+function switchTab(tab: 'overview' | 'priority' | 'records' | 'plans') {
+  activeTab.value = tab;
+  if (tab === 'plans' && !store.plansLoaded && !store.plansLoading && !store.plansLoadError) {
+    store.loadInspectionPlans().catch(() => { /* 失败态由页面内空态 + 重试承接 */ });
+  }
+}
+
+function handleRetryLoadPlans() {
+  store.retryLoadInspectionPlans().catch(() => { /* 保持失败空态，可再次重试 */ });
+}
+
+function ensurePlansLoaded() {
+  if (store.plansLoaded || store.plansLoading || store.plansLoadError) return;
+  store.loadInspectionPlans().catch(() => { /* 首次加载失败时展示重试空态 */ });
+}
+
+function openCreatePlan() {
+  editorMode.value = 'create';
+  editingPlanId.value = null;
+  editorName.value = '';
+  editorDescription.value = '';
+  editorSelectedIds.value = [];
+  editorVisible.value = true;
+}
+
+function openEditPlan(plan: InspectionPlan) {
+  editorMode.value = 'edit';
+  editingPlanId.value = plan.id;
+  editorName.value = plan.name;
+  editorDescription.value = plan.description || '';
+  editorSelectedIds.value = [...plan.deviceIds];
+  editorVisible.value = true;
+}
+
+function closeEditor() {
+  editorVisible.value = false;
+  editingPlanId.value = null;
+}
+
+function toggleDevice(deviceId: string) {
+  const idx = editorSelectedIds.value.indexOf(deviceId);
+  if (idx === -1) editorSelectedIds.value.push(deviceId);
+  else editorSelectedIds.value.splice(idx, 1);
+}
+
+function toggleSelectAllDevices(select: boolean) {
+  editorSelectedIds.value = select ? store.devices.map(d => d.id) : [];
+}
+
+function handleSavePlan() {
+  if (!canSavePlan.value) return;
+  if (editorMode.value === 'create') {
+    store.createInspectionPlan(editorName.value, editorSelectedIds.value, editorDescription.value);
+  } else if (editingPlanId.value) {
+    store.updatePlanDevices(editingPlanId.value, editorSelectedIds.value);
+  }
+  closeEditor();
+}
+
+function handlePause(plan: InspectionPlan) {
+  store.pauseInspectionPlan(plan.id);
+}
+
+function handleResume(plan: InspectionPlan) {
+  store.resumeInspectionPlan(plan.id);
+}
+
+function getStats(plan: InspectionPlan): PlanStatsSnapshot | null {
+  return store.getPlanStats(plan);
+}
+
+function getDeviceHealthScore(deviceId: string): number {
+  return store.getDeviceHealth(deviceId)?.healthScore ?? 0;
+}
+
+function jumpToDevice(deviceId: string) {
+  const health = store.getDeviceHealth(deviceId);
+  if (health) {
+    selectedDevice.value = health;
+    store.setHighlightedDevice(deviceId);
+    activeTab.value = 'overview';
+    nextTick(() => renderCharts());
+  }
+}
+
+function getStatusBadgeStyle(status: InspectionPlanStatus) {
+  return {
+    fontSize: '10px',
+    padding: '1px 7px',
+    borderRadius: '8px',
+    fontWeight: 600,
+    background: status === 'active' ? '#e8f5e9' : '#f5f5f5',
+    color: status === 'active' ? '#2e7d32' : '#757575'
+  };
+}
+
+function getStatusLogIcon(type: PlanStatusLogType): string {
+  switch (type) {
+    case 'created': return '🆕';
+    case 'updated': return '🛠️';
+    case 'active': return '▶️';
+    case 'paused': return '⏸️';
+  }
+}
+
+function formatPlanTime(isoString?: string): string {
+  if (!isoString) return '';
+  const date = new Date(isoString);
+  const now = new Date();
+  const diff = now.getTime() - date.getTime();
+  if (diff < 60000) return '刚刚';
+  if (diff < 3600000) return Math.floor(diff / 60000) + '分钟前';
+  if (diff < 86400000) return Math.floor(diff / 3600000) + '小时前';
+  return date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' }) +
+    ' ' + date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+}
+
+function renderPlanSparkline(plan: InspectionPlan): string {
+  if (plan.history.length === 0) return '';
+  const w = 360;
+  const h = 48;
+  const pad = 4;
+  const points = plan.history;
+
+  const toPath = (pick: (p: { avgHealthScore: number; avgOnlineRate: number }) => number, color: string) => {
+    const coords = points.map((p, i) => {
+      const x = pad + (i / Math.max(1, points.length - 1)) * (w - pad * 2);
+      const y = pad + (1 - pick(p) / 100) * (h - pad * 2);
+      return { x, y };
+    });
+    const d = coords.map((c, i) => (i === 0 ? `M ${c.x.toFixed(1)} ${c.y.toFixed(1)}` : `L ${c.x.toFixed(1)} ${c.y.toFixed(1)}`)).join(' ');
+    const last = coords[coords.length - 1];
+    return `<path d="${d}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>` +
+      `<circle cx="${last.x.toFixed(1)}" cy="${last.y.toFixed(1)}" r="2.4" fill="${color}"/>`;
+  };
+
+  const scorePath = toPath(p => p.avgHealthScore, '#1976d2');
+  const onlinePath = toPath(p => p.avgOnlineRate, '#4caf50');
+  const grid = [25, 50, 75].map(v => {
+    const y = pad + (1 - v / 100) * (h - pad * 2);
+    return `<line x1="${pad}" y1="${y}" x2="${w - pad}" y2="${y}" stroke="#eee" stroke-dasharray="2,2"/>`;
+  }).join('');
+
+  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="width:100%;height:${h}px;display:block;vector-effect:non-scaling-stroke">${grid}${scorePath}${onlinePath}</svg>`;
+}
 
 const currentHistoryData = computed(() => {
   if (selectedDevice.value) {
@@ -581,6 +984,7 @@ onMounted(() => {
   if (store.deviceHealthList.length > 0 && !selectedDevice.value) {
     selectedDevice.value = store.deviceHealthList[0];
   }
+  ensurePlansLoaded();
   nextTick(() => {
     renderCharts();
   });
@@ -591,3 +995,9 @@ onMounted(() => {
   window.addEventListener('resize', handleResize);
 });
 </script>
+
+<style>
+@keyframes dh-spin {
+  to { transform: rotate(360deg); }
+}
+</style>
